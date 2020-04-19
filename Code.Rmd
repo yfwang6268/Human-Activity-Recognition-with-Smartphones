@@ -148,7 +148,6 @@ df_tBodyAcc.arCoeff = colcheck(df,"tBodyAcc.arCoeff")
 df_tBodyAcc.correlation = colcheck(df,"tBodyAcc.correlation")
 ```
 
-
 ## Feattures engineering
 
 ### dimension reduction
