@@ -13,9 +13,11 @@ In this dataset, we have 561 attributes and 7352 records. For each record in the
 •	An identifier of the subject who carried out the experiment. 
 
 We will use below major units in this project:
-•	 Dimension reduction:
-o	Principal Component Analysis
-•	Classification models:
-o	k-nearest neighbor
-o	logistic regression
-o	random forest
+
+Dimension reduction:
+* Principal Component Analysis
+
+Classification models:
+* k-nearest neighbor
+*	logistic regression
+* random forest
