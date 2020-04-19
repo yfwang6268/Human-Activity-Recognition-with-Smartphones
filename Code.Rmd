@@ -1,0 +1,160 @@
+---
+title: "Human Activity Recognition with Smartphones"
+output: html_notebook
+---
+
+```{r, warning = FALSE, message=FALSE}
+rm(list=ls())
+
+library(knitr)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(corrplot)
+library(caret)
+library(gridExtra)
+library(scales)
+library(Rmisc)
+library(ggrepel)
+library(randomForest)
+library(psych)
+library(xgboost)
+```
+
+## Read Data 
+
+```{r}
+train <- read.csv("~/Github/Human-Activity-Recognition-with-Smartphones/Data/train.csv")
+test <- read.csv("~/Github/Human-Activity-Recognition-with-Smartphones/Data/test.csv")
+```
+
+### Explort the data
+
+```{r}
+dim(train)
+```
+
+```{r}
+dim(test)
+```
+
+### column types
+
+```{r}
+colnames = colnames(train)
+m = length(colnames(train))
+
+coltype <- vector()
+colstat <- vector()
+for (j in 1:m){
+  temp=strsplit(colnames[j],"[.]")[[1]]
+  coltype[j] = temp[1]
+  colstat[j] = temp[2]
+}
+print(table(coltype))
+print(table(colstat))
+```
+
+### combine the train and test 
+
+```{r}
+df <- rbind(train, test)
+dim(df)
+```
+
+### column data type
+
+```{r}
+table(sapply(train, class))
+```
+
+interger is subject column
+
+### check na
+
+```{r}
+sum(is.na(df))
+```
+
+### The response variable; Activity
+
+```{r,fig.width=10, fig.height=3.5}
+ggplot(data=df[!is.na(df$Activity),], aes(x=Activity)) +
+  geom_bar(fill="blue", stat='count', width=.75) +
+  coord_cartesian(ylim = c(1250, 2000))
+table(df$Activity)
+```
+
+The response varaible is balanced. We do not need to perform sampling techniques.
+
+### 7-characteristics: angle
+
+```{r}
+colcheck <- function(df,pattern){
+  colnames = colnames(df)
+  df_subset <- df[,sapply(colnames,grepl,fixed=TRUE,pattern=pattern)]
+  colnames_df_subset = colnames(df_subset)
+  colstat <- vector()
+  m = length(colnames_df_subset)
+  for (j in 1:m){
+    temp=strsplit(colnames_df_subset[j],"[.]")[[1]]
+    colstat[j] = temp[2]
+  }
+  print(kable(table(colstat)))
+  print(describe(df_subset))
+  return(df_subset)
+}
+
+df_angle = colcheck(df,"angle")
+```
+
+```{r}
+cor(df_angle)
+```
+
+### 79 characteristics: fBodyAcc
+
+```{r}
+df_fBodyAcc = colcheck(df,"fBodyAcc.")
+```
+
+#### fBodyAcc.bandsEnergy
+
+```{r}
+df_fBodyAcc.bandsEnergy = colcheck(df,"fBodyAcc.bandsEnergy")
+```
+
+### 13-characterstics fBodyBodyAccJerkMag
+
+```{r}
+df_fBodyAccJerk = colcheck(df,"fBodyBodyAccJerkMag")
+```
+
+### 40-characteristic: tBodyAcc
+
+```{r}
+df_tBodyAcc = colcheck(df,"tBodyAcc.")
+```
+
+#### tBodyAcc.arCoeff
+
+```{r}
+df_tBodyAcc.arCoeff = colcheck(df,"tBodyAcc.arCoeff")
+```
+
+#### tBodyAcc.correlation
+
+```{r}
+df_tBodyAcc.correlation = colcheck(df,"tBodyAcc.correlation")
+```
+
+
+## Feattures engineering
+
+### dimension reduction
+
+We are going to use PCA to do dimension reduction on time-serise data
+
+40-characteristic: arCoef
+79-characteristic: bandsEnergy
+
