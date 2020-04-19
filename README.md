@@ -1,5 +1,5 @@
 # STAT6302_Final_Project_Human_Activity_Recognition_with_Smartphones
-https://www.kaggle.com/uciml/human-activity-recognition-with-smartphones
+
 The overall goal of this project is to build classification models to identify activities of daily living (ADL) into one of the six categories.
 
 For this project, we are going to use the dataset ‘Human Activity Recognition with Smartphones’ from UCI Machine Learning with link below
