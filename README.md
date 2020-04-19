@@ -1,4 +1,4 @@
-# STAT6302_Final_Project_Human_Activity_Recognition_with_Smartphones
+# Human_Activity_Recognition_with_Smartphones
 
 The overall goal of this project is to build classification models to identify activities of daily living (ADL) into one of the six categories.
 
