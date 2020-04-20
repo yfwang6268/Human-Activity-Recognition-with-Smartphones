@@ -19,6 +19,7 @@ library(ggrepel)
 library(randomForest)
 library(psych)
 library(xgboost)
+library(factoextra)
 ```
 
 ## Read Data 
@@ -77,6 +78,12 @@ sum(is.na(df))
 ```
 
 ### The response variable; Activity
+
+From below we can see, 'Activiies' can be cateogirzed into two ways:
+1. static and moving
+2. up, down and same level
+
+We will use these informaion to create 
 
 ```{r,fig.width=10, fig.height=3.5}
 ggplot(data=df[!is.na(df$Activity),], aes(x=Activity)) +
@@ -154,6 +161,121 @@ df_tBodyAcc.correlation = colcheck(df,"tBodyAcc.correlation")
 
 We are going to use PCA to do dimension reduction on time-serise data
 
-40-characteristic: arCoef
+arCoeff(): Autorregresion coefficients with Burg order equal to 4
+use pca to 
+
+```{r}
+char_40_var_cols = c("tBodyAcc.","tBodyAccJerk.","tBodyGyro.","tBodyGyroJerk.","tGravityAcc.")
+colnames = colnames(df)
+for(col in char_40_var_cols){
+  pattern = paste(col,"arCoef",sep="")
+  df_subset = df[,sapply(colnames(df),grepl,fixed=TRUE,pattern=pattern)]
+  df_subset_PCA = prcomp(df_subset)
+  cumpve = summary(df_subset_PCA)$importance
+  selected_pc_cols= sum(cumpve["Cumulative Proportion",] < 0.8) + 1
+  selected_pcs = df_subset_PCA$x[,(1:selected_pc_cols)]
+  selected_pcs_colnames = vector(length=selected_pc_cols)
+  for(i in 1:selected_pc_cols){
+    selected_pcs_colnames[i] = paste(pattern,paste("pc",i,sep=""),sep=".")
+  }
+  colnames(selected_pcs) <- selected_pcs_colnames
+  df[,colnames(df_subset)] <- NULL
+  df= cbind(df,selected_pcs)
+}
+```
+
 79-characteristic: bandsEnergy
 
+```{r}
+char_79_var_cols = c("fBodyAcc.","fBodyAccJerk.","fBodyGyro.")
+for(col in char_79_var_cols){
+  pattern = paste(col,"bandsEnergy",sep="")
+  df_subset = df[,sapply(colnames(df),grepl,fixed=TRUE,pattern=pattern)]
+  df_subset_PCA = prcomp(df_subset)
+  cumpve = summary(df_subset_PCA)$importance
+  selected_pc_cols= sum(cumpve["Cumulative Proportion",] < 0.8) + 1
+  selected_pcs = df_subset_PCA$x[,(1:selected_pc_cols)]
+  selected_pcs_colnames = vector(length=selected_pc_cols)
+  for(i in 1:selected_pc_cols){
+    selected_pcs_colnames[i] = paste(pattern,paste("pc",i,sep=""),sep=".")
+  }
+  colnames(selected_pcs) <- selected_pcs_colnames
+  df[,colnames(df_subset)] <- NULL
+  df= cbind(df,selected_pcs)
+}
+```
+
+### Moving and Static 
+
+The idea is coming from the below kernel
+https://www.kaggle.com/vikashrajluhaniwal/eda-all-classification-algorithms-with-96-acc
+
+```{r,fig.width=10, fig.height=3.5}
+ggplot(data=df, mapping=aes(x=Activity, y = fBodyAcc.mean...X + fBodyAcc.mean...Y))+
+  geom_boxplot(outlier.shape=NA) +
+  ylab("fBodyAcc.mean.X + fBodyAcc.mean.Y")
+```
+
+```{r}
+df$dynamic_static = ifelse(df$fBodyAcc.mean...X+df$fBodyAcc.mean...Y > -1.5, "dynamic","static")
+df$dynamic_static = as.factor(df$dynamic_static)
+```
+
+
+### Resting
+
+```{r,fig.width=10, fig.height=3.5}
+ggplot(data = df, mapping = aes(x=Activity, y=angle.X.gravityMean.)) +
+  geom_boxplot(outlier.shape=NA)
+```
+
+```{r}
+df$resting = ifelse(df$angle.X.gravityMean. > 0,1,0)
+df$resting = as.factor(df$resting)
+```
+
+# upward_downward_same
+
+```{r}
+df$upward_downward_same = 0
+df[df$Activity == "WALKING_UPSTAIRS",c("upward_downward_same")] = 1
+# df[df$Activity == "WALKING_DOWNSTAIRS",c("upward_downward_same")] = -1
+df$upward_downward_same = as.factor(df$upward_downward_same)
+
+set.seed(2018)
+quick_RF <- randomForest(x=subset(df[1:7352,],select=-c(upward_downward_same,Activity)), y=df$upward_downward_same[1:7352], ntree=100,importance=TRUE)
+imp_RF <- importance(quick_RF)
+imp_DF <- data.frame(Variables = row.names(imp_RF), feat_imp = imp_RF[,1])
+imp_DF <- imp_DF[order(imp_DF$feat_imp, decreasing = TRUE),]
+```
+
+```{r}
+ggplot(imp_DF[1:20,], aes(x=reorder(Variables, feat_imp), y=feat_imp, fill=feat_imp)) + 
+  geom_bar(stat = 'identity') + labs(x = 'Variables', y= 'Mean Decrease of Accuracy') + coord_flip() + theme(legend.position="none")
+```
+```{r}
+imp_DF
+```
+
+```{r}
+ggplot(data = df, mapping = aes(x=Activity, y=-tGravityAcc.arCoef.pc1
+-tGravityAcc.min...Y	
+-tGravityAcc.mean...Y
+#+tGravityAcc.energy...Y
+#+fBodyGyro.maxInds.Z
+-fBodyAcc.meanFreq...Z
++angle.Y.gravityMean.
+#+fBodyGyro.kurtosis...Y
+-fBodyAccJerk.maxInds.Z
++fBodyBodyAccJerkMag.max..)) + 
+  geom_boxplot(outlier.shape=NA)
++ ylab("upstairs")
+```
+
+
+```{r}
+df$upward_downward_same = NULL
+df$upstairs = with(df, -tGravityAcc.arCoef.pc1 - tGravityAcc.min...Y - tGravityAcc.mean...Y - fBodyAcc.meanFreq...Z + angle.Y.gravityMean. - fBodyAccJerk.maxInds.Z + fBodyBodyAccJerkMag.max..)
+df$upstairs = ifelse(df$upstairs > 1, 1,0)
+df$upstairs = as.factor(df$upstairs )
+```
