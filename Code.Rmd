@@ -20,6 +20,11 @@ library(randomForest)
 library(psych)
 library(xgboost)
 library(factoextra)
+library(pROC)
+library(parallel)
+library(doParallel)
+library(kernlab)
+library(MLmetrics)
 ```
 
 ## Read Data 
@@ -268,8 +273,8 @@ ggplot(data = df, mapping = aes(x=Activity, y=-tGravityAcc.arCoef.pc1
 #+fBodyGyro.kurtosis...Y
 -fBodyAccJerk.maxInds.Z
 +fBodyBodyAccJerkMag.max..)) + 
-  geom_boxplot(outlier.shape=NA)
-+ ylab("upstairs")
+  geom_boxplot(outlier.shape=NA) + 
+  ylab("upstairs")
 ```
 
 
@@ -277,5 +282,103 @@ ggplot(data = df, mapping = aes(x=Activity, y=-tGravityAcc.arCoef.pc1
 df$upward_downward_same = NULL
 df$upstairs = with(df, -tGravityAcc.arCoef.pc1 - tGravityAcc.min...Y - tGravityAcc.mean...Y - fBodyAcc.meanFreq...Z + angle.Y.gravityMean. - fBodyAccJerk.maxInds.Z + fBodyBodyAccJerkMag.max..)
 df$upstairs = ifelse(df$upstairs > 1, 1,0)
-df$upstairs = as.factor(df$upstairs )
+df$upstairs = as.factor(df$upstairs)
 ```
+
+### Modelling
+
+```{r}
+train <- df[1:7352,]
+test <- df[7353:10299,]
+```
+
+#### Random Forest
+
+```{r}
+
+mtryValues <- c(30,50,70,100,200)
+
+cl <- makePSOCKcluster(8)
+registerDoParallel(cl)
+start_time_rf <- Sys.time()
+ctrl <- trainControl(method="repeatedcv", number=10, repeats=5, search="random",classProbs = TRUE)
+
+set.seed(476)
+rf <- train(x = subset(train,select=-c(subject,Activity)), 
+            y = train$Activity,
+            method = "rf",
+            ntree = 500,
+            tuneGrid = data.frame(mtry = mtryValues),
+            importance = TRUE,
+            metric = "Kappa",
+            trControl = ctrl)
+
+stopCluster(cl)
+end_time_rf <- Sys.time()
+end_time_rf - start_time_rf
+
+##Pro tip: save your results immediately after running (in case you have to leave your computer)
+saveRDS(rf, '~/Github/Human-Activity-Recognition-with-Smartphones/RF_df.rds')
+```
+
+#### XGBoost
+
+```{r}
+set.seed(476)
+registerDoParallel(cl)
+xgb <- train(x=subset(train,select=-c(subject,Activity)), 
+             y=train$Activity,
+             method="xgbTree",
+             trControl=trnCtrl,
+             tuneLength=3)
+saveRDS(xgb, '~/Github/Human-Activity-Recognition-with-Smartphones/xgb.rds')
+stopCluster(cl)
+end_time_xgb<- Sys.time()
+end_time_xgb - start_time_xgb
+```
+
+#### Support Vector Machines
+
+```{r}
+set.seed(476)
+registerDoParallel(cl)
+ctrl <- trainControl(method = "repeatedcv",
+                     summaryFunction = multiClassSummary,
+                     classProbs = TRUE,
+                     savePredictions = TRUE,
+                     repeats = 5)
+
+sigmaRangeFull <- sigest(as.matrix(subset(train,select=-c(subject,Activity))))
+svmRGridFull <- expand.grid(sigma =  as.vector(sigmaRangeFull),
+                            C = 2^(-3:3))
+svm <- train(x = subset(train,select=-c(subject,Activity)),
+             y = train$Activity,
+             method = "svmRadial",
+             metric = "ROC",
+             tuneGrid = svmRGridFull,
+             trControl = ctrl)
+saveRDS(svm, '~/Github/Human-Activity-Recognition-with-Smartphones/svm.rds')
+stopCluster(cl)
+```
+
+#### Neutral Networks
+
+```{r}
+nnetGrid <- expand.grid(size = 1:10, decay = c(0, .1, 1, 2))
+maxSize <- max(nnetGrid$size)
+registerDoParallel(cl)
+nnetFit <- train(x = subset(train,select=-c(subject,Activity)), 
+                 y = train$Activity,
+                 method = "nnet",
+                 metric = "ROC",
+                 tuneGrid = nnetGrid,
+                 trace = FALSE,
+                 maxit = 2000,
+                 MaxNWts = 1*(maxSize * (ncol(subset(train,select=-c(subject,Activity))) + 1) + maxSize + 1),
+                 trControl = ctrl)
+saveRDS(nnetFit, '~/Github/Human-Activity-Recognition-with-Smartphones/nnetFit.rds')
+stopCluster(cl)
+```
+
+
+
