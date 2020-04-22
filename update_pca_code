@@ -1,0 +1,195 @@
+rm(list=ls())
+
+library(knitr)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(corrplot)
+library(caret)
+library(gridExtra)
+library(scales)
+library(Rmisc)
+library(ggrepel)
+library(randomForest)
+library(psych)
+library(xgboost)
+library(factoextra)
+library(pROC)
+library(parallel)
+library(doParallel)
+library(kernlab)
+library(MLmetrics)
+
+cl <- 8
+path <- "~/Github/Human-Activity-Recognition-with-Smartphones/"
+
+train <- read.csv(paste(path,"Data/train.csv",sep=""))
+test <- read.csv(paste(path,"Data/test.csv",sep=""))
+
+df <- rbind(train, test)
+subject <- df$subject
+df$subject <- NULL
+
+colnames = colnames(train)
+m = length(colnames(train))
+
+coltype <- vector()
+colstat <- vector()
+for (j in 1:m){
+  temp=strsplit(colnames[j],"[.]")[[1]]
+  coltype[j] = temp[1]
+  colstat[j] = temp[2]
+}
+
+# feature engineering
+
+### dynamic and static 
+df$dynamic_static = ifelse(df$fBodyAcc.mean...X+df$fBodyAcc.mean...Y > -1.5, 1,0)
+
+### resting
+df$resting = ifelse(df$angle.X.gravityMean. > 0,1,0)
+
+### upstairs
+df$upstairs = with(df, - tGravityAcc.min...Y - tGravityAcc.mean...Y - fBodyAcc.meanFreq...Z + angle.Y.gravityMean. - fBodyAccJerk.maxInds.Z + fBodyBodyAccJerkMag.max..)
+df$upstairs = ifelse(df$upstairs > 1, 1,0)
+
+# PCA dimension rreduction
+
+for(col in coltype){
+  pattern = paste(col,".",sep="")
+  df_subset = df[,sapply(colnames(df),grepl,fixed=TRUE,pattern=pattern)]
+  df_subset_PCA = prcomp(df_subset)
+  cumpve = summary(df_subset_PCA)$importance
+  selected_pc_cols= sum(cumpve["Cumulative Proportion",] < 0.8) + 1
+  selected_pcs = df_subset_PCA$x[,(1:selected_pc_cols)]
+  selected_pcs_colnames = vector(length=selected_pc_cols)
+  for(i in 1:selected_pc_cols){
+    selected_pcs_colnames[i] = paste(pattern,paste("pc",i,sep=""),sep=".")
+  }
+  colnames(selected_pcs) <- selected_pcs_colnames
+  df[,colnames(df_subset)] <- NULL
+  df= cbind(df,selected_pcs)
+}
+
+### Modelling
+
+
+train <- df[1:7352,]
+test <- df[7353:10299,]
+
+
+#### Random Forest
+
+mtryValues <- c(30,50,70,100,200)
+
+cl <- makePSOCKcluster(8)
+registerDoParallel(cl)
+start_time_rf <- Sys.time()
+ctrl <- trainControl(method="repeatedcv", number=10, repeats=5, search="random",classProbs = TRUE)
+
+set.seed(476)
+rf <- train(x = subset(train,select=-c(subject,Activity)), 
+            y = train$Activity,
+            method = "rf",
+            ntree = 500,
+            tuneGrid = data.frame(mtry = mtryValues),
+            importance = TRUE,
+            metric = "Kappa",
+            trControl = ctrl)
+
+
+end_time_rf <- Sys.time()
+end_time_rf - start_time_rf
+
+##Pro tip: save your results immediately after running (in case you have to leave your computer)
+saveRDS(rf, paste(path,"rf.rds",sep=""))
+
+
+#### XGBoost
+
+
+set.seed(476)
+start_time_xgb<- Sys.time()
+
+
+ 
+#trnCtrl <- trainControl(method="cv")
+ctrl <- trainControl(method="repeatedcv",
+                     number=10, 
+                     repeats=5,
+                     allowParallel = TRUE,
+                     verbose = TRUE,
+                     search = "grid")
+#cl <- makePSOCKcluster(8)
+#registerDoParallel(cl)
+#y_train = as.numeric(train$Activity) - 1
+train_xgb = subset(train,select=-c(subject))
+xgb <- train(Activity ~.,
+             data = train_xgb,
+             method="xgbTree",
+             importance = TRUE,
+             metric = "Kappa",
+             trControl=ctrl,
+             tuneLength=3)
+
+saveRDS(xgb, )
+
+end_time_xgb<- Sys.time()
+end_time_xgb - start_time_xgb
+
+
+#### Support Vector Machines
+
+
+set.seed(476)
+start_time_svm <- Sys.time()
+
+ctrl <- trainControl(method = "repeatedcv",
+                     summaryFunction = multiClassSummary,
+                     classProbs = TRUE,
+                     savePredictions = TRUE,
+                     repeats = 5)
+
+sigmaRangeFull <- sigest(as.matrix(subset(train,select=-c(subject,Activity))))
+svmRGridFull <- expand.grid(sigma =  as.vector(sigmaRangeFull),
+                            C = 2^(-3:3))
+svm <- train(x = subset(train,select=-c(subject,Activity)),
+             y = train$Activity,
+             method = "svmRadial",
+             metric = "Kappa",
+             tuneGrid = svmRGridFull,
+             trControl = ctrl)
+saveRDS(svm, paste(path,"svm.rds",sep=""))
+end_time_svm <- Sys.time()
+
+end_time_svm - start_time_svm
+
+#### Neutral Networks
+
+start_time_nnet <- Sys.time()
+nnetGrid <- expand.grid(size = 1:10, decay = c(0, .1, 1, 2))
+maxSize <- max(nnetGrid$size)
+start_time_nn <- Sys.time()
+
+ctrl <- trainControl(method = "repeatedcv",
+                     summaryFunction = multiClassSummary,
+                     classProbs = TRUE,
+                     savePredictions = TRUE,
+                     repeats = 5)
+
+nnetFit <- train(x = subset(train,select=-c(subject,Activity)), 
+                 y = train$Activity,
+                 method = "nnet",
+                 metric = "Kappa",
+                 tuneGrid = nnetGrid,
+                 trace = FALSE,
+                 maxit = 2000,
+                 MaxNWts = 1*(maxSize * (ncol(subset(train,select=-c(subject,Activity))) + 1) + maxSize + 1),
+                 trControl = ctrl)
+saveRDS(nnetFit, paste(path,"nn.rds",sep=""))
+
+
+end_time_nn <- Sys.time()
+end_time_nn - start_time_nn
+stopCluster(cl)
+
