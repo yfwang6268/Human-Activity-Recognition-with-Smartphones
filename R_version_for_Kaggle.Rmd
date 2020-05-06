@@ -1,0 +1,643 @@
+---
+title: "STAT 6302 Data Assignment #1"
+subtitle: "Yifei Wang"
+output: pdf_document
+fig_caption: yes
+---
+
+```{r "setup",include = FALSE, eval=FALSE}
+rm(list=ls())
+require("knitr")
+opts_knit$set(root.dir = "~/Desktop/STAT6302/Data Assignment 01")
+```
+
+```{r,message=FALSE, include=FALSE}
+rm(list=ls())
+library(Sleuth2)
+library(glmnet)
+library(caret)
+library(leaps)
+library(bestglm)
+library(VIM)
+library(plyr)
+library(dplyr)
+library(MASS)
+library(ggplot2)
+library(gmodels)
+library(Hmisc) 
+library(corrplot)
+library(earth)
+library(splines)
+```
+
+
+```{r, include = FALSE}
+train <- read.csv("train.csv", stringsAsFactors = FALSE)
+test <- read.csv("test.csv", stringsAsFactors = FALSE)
+testID <- test$Id
+```
+
+# Introduction
+
+In this data assignment, the objective is to predict sale prices of homes in all neighborhoods in Ames, Iowa. From the preivous project, we identify 'GrLivArea' is one of the most important predictors. We identify two points with GrLivArea larger than $4000$ but SalePrice lower than $300000$. We check these two points by looking at their quality evaluation scores as below. These properties have very excellent overall material and finish of the house, at least average rates of overall condition of the house and very large GrlivArea. We identify these two observation as outliers which cannot represent the general trend of overall housing price. Thus, we remove these two points from the train set.
+
+```{r,echo=FALSE}
+train[(train['GrLivArea'] > 4000) & (train['SalePrice'] > 300000),c('SalePrice','GrLivArea','OverallQual', 'OverallCond')]
+```
+
+As we did in the previous project, we transform 'NA' to 'None' in categorical evaluation variables and apply KNN method from VIM package to impute the missing value. After combing train set and test set, there are  $2915$ rows and $80$ predictors in the dataset.
+
+```{r,message=FALSE,warning=FALSE, include=FALSE}
+train = subset(train, GrLivArea < 4000)
+SalePrice = train$SalePrice
+test$SalePrice <- 0
+
+#Combine the test and train data set and remove Id columns
+df <- rbind(train,test)
+df$Id <- NULL
+
+NAcols2 = c("PoolQC","MasVnrType", "MiscFeature","Alley","Fence", "FireplaceQu","GarageFinish","GarageQual","GarageCond","GarageType",
+         "BsmtCond","BsmtExposure","BsmtQual","BsmtFinType2","BsmtFinType1")
+for (col in NAcols2){
+  df[col][is.na(df[col])] = "None"
+}
+
+# For the rest missing values, we use KNN from package VIM to impute.
+df = kNN(df)
+df = df[,1:80]
+```
+
+# Feature Engineering
+
+In this part, we perform transformations, creating dummy variables ,binning predictors and other new predictors based on existing predictors. We also identify and remove "nero-zero variance" predictors. A natural cubic spline with five DF is created based on a continues variable. Last but not least, we do the log transformation on SalePrice to fix non-normality issues. Part of code and method are taking reference to Kernel 'House prices: Lasso, XGBoost, and a detailed EDA' by Erik Bruin [link](https://www.kaggle.com/erikbruin/house-prices-lasso-xgboost-and-a-detailed-eda).
+
+## Transformation
+
+In this part, we perform below transformations and further dummy variables are created based on most of these variables:
+
+* Transform YrSold and MoSold from numerical variables to factor variables, given the reason that these variables should be categorical data of continuous numeric data and number of years will be handled by other variables.
+* Transform MSSubClass from numerical variables to string variables based on the project documentation, given the reason that MSSubClass represent the type of dwelling and should not be continuous numeric data.
+* Transform  below categorical variables to numeric order variables, given the reason that these categorical variables are ordered evaluation and the numeric ordered variables can be feed to the model directly without creating dummy variables.
+  + PoolQC,ExterQual ,ExterCond, HeatingQC, GarageQual, GarageCond, KitchenQual, FireplaceQu
+  + BsmtQual, BsmtCond, BsmtExposure, BsmtFinType1, BsmtFinType2
+
+```{r, include=FALSE}
+
+# transform YrSold and MoSold from numerical variables to factor variables. 
+df$YrSold <- as.factor(df$YrSold)
+df$MoSold <- as.factor(df$MoSold)
+
+# transform MSSubClass from numerical values to string values
+df$MSSubClass <- as.factor(df$MSSubClass)
+df$MSSubClass<-revalue(df$MSSubClass, c('20'='1 story 1946+', '30'='1 story 1945-', '40'='1 story unf attic', '45'='1,5 story unf', '50'='1,5 story fin', '60'='2 story 1946+', '70'='2 story 1945-', '75'='2,5 story all ages', '80'='split/multi level', '85'='split foyer', '90'='duplex all style/age', '120'='1 story PUD 1946+', '150'='1,5 story PUD all', '160'='2 story PUD 1946+', '180'='PUD multilevel', '190'='2 family conversion'))
+
+# transform "PoolQC","ExterQual","ExterCond", "BsmtQual", "BsmtCond", "BsmtExposure", "HeatingQC", "KitchenQual", "FireplaceQu", "GarageQual", "GarageCond","BsmtFinType1", "BsmtFinType2" from character evaluation values to numeric values.
+
+Score <- function(condition){
+  if (condition == "None") {result = 0}
+  else if (condition == "GLQ") {result = 6}
+  else if (is.element(condition,c("Ex","ALQ"))) {result = 5}
+  else if (is.element(condition,c("Gd","BLQ"))) {result = 4}
+  else if (is.element(condition,c("Av","Rec","TA"))) {result = 3}
+  else if (is.element(condition,c("Fa","LwQ","Mn") )){result = 2}
+  else if (is.element(condition,c("Po","Unf","No"))) {result = 1}
+  else {
+    result = condition
+  }
+  return(result)
+}
+
+score_cols_1 <- c("PoolQC","ExterQual","ExterCond", "BsmtQual", "BsmtCond", 
+                  "BsmtExposure", "HeatingQC", "KitchenQual", "FireplaceQu", 
+                  "GarageQual", "GarageCond","BsmtFinType1", "BsmtFinType2")
+
+for (col in score_cols_1){
+  df[col] = apply(df[col],1,Score)
+}
+```
+  
+## Creating Dummy variables
+
+In this part, we are using *model.matrix()* to create dummy variables and remove the intercept in the final output. We end up with $241$ predictors at this point
+
+```{r, include=FALSE}
+Predictors = model.matrix(SalePrice ~., data = df)
+Predictors = Predictors[,-1] # cut off the intercept from the first column
+```
+
+## Identify and remove predictors with near-zero variance
+
+At this part, we first use *nearZeroVar()* function. However, the function deletes 140 variables which removes too much information. Thus, we will proceed manully at this stage.
+
+1. We remove $15$ predictors beacuse the value is either missing in train set or test set.
+2. We remove $26$ variables only having less than $10$ non-zero values acrossing all the dataset.
+
+```{r,include=FALSE}
+Predictors_train <- Predictors[df$SalePrice != 0,]
+Predictors_test <- Predictors[df$SalePrice == 0,]
+  
+MissingValuesInTrain <- apply(Predictors_train,2 ,sum)
+MissingValuesInTrain <- names(MissingValuesInTrain[MissingValuesInTrain==0])
+MissingValuesInTest <- apply(Predictors_test,2,sum)
+MissingValuesInTest <- names(MissingValuesInTest[MissingValuesInTest==0])
+Drop_Cols = c(MissingValuesInTrain, MissingValuesInTest)
+Predictors <- Predictors[,!(colnames(Predictors) %in% Drop_Cols)]
+
+# Drop above columns
+LessThan10Varibles <- apply(Predictors,2 ,sum)
+LessThan10Varibles <- names(LessThan10Varibles[LessThan10Varibles<=10])
+Predictors <- Predictors[,!(colnames(Predictors) %in% LessThan10Varibles)]
+```
+  
+## Create new variable TotalBath
+
+As we can see below, HalfBath, FullBath, BsmtHalfBath and BsmtFullBath do not have strong correlation with SalePrice individually. Thus, we create a predictor TotalBath by adding them together and removing origin bath variables. And the new variable 'TotalBath' has a stronger correlation with SalePrice.
+
+```{r, echo=FALSE, include=FALSE}
+Predictors = data.frame(Predictors)
+Predictors$TotalBath <- Predictors$HalfBath*0.5 + Predictors$FullBath + Predictors$BsmtFullBath + Predictors$BsmtHalfBath*0.5
+res <- cbind(Predictors[df$SalePrice!=0,c('TotalBath','BsmtFullBath','BsmtHalfBath','FullBath','HalfBath')],
+             df[df$SalePrice!=0,]$SalePrice)
+names(res) <- c('TotalBath','BsmtFullBath','BsmtHalfBath','FullBath','HalfBath','SalePrice')
+round(cor(res)[,6],4)
+Predictors[,c('BsmtFullBath','BsmtHalfBath','FullBath','HalfBath')] <- NULL
+```
+
+## Create new variables HighValuePlace
+
+As we can see from below, three neighborhood(StoneBr,NoRidge, and NridgHt) have higher mean of SalePrce than other places. So we create a dummy variable HighValuePlace by binning these three neighborhoods. The value equals 1 if the neighborhood is within above three districts, otherwise 0.
+
+```{r, echo=FALSE,fig.width=6,fig.height=2.5}
+par(mfrow = c(1,2))
+ggplot(data = df[df$SalePrice > 0,],aes(x=reorder(Neighborhood, SalePrice, FUN=mean),y=SalePrice)) +
+  geom_bar(stat = 'summary', fun.y = 'mean', fill = 'blue') +
+  labs(x='Neighborhood',y='Mean SalePrice') +
+  theme(axis.text.x = element_text(angle = 75, hjust = 1))
+Predictors['HighValuePlace'] <- 0
+Predictors[df$Neighborhood %in% c("StoneBr","NridgHt","NoRidge"),]['HighValuePlace'] <- 1
+```
+
+## Create new variable TotalExtraSF and TotalSF
+
+Since below space area variables do not show linear relationship with SalePrice (Scatter plots can be seen in the appendix),
+
+* MasVnrArea, LowQualFinSF, WoodDeckSF,PoolArea
+* OpenPorchSF, EnclosedPorch, X3SsnPorch, ScreenPorch
+
+We would like to create a variable "TotalExtraSF" by summing up these variables and removing the original variables. 
+
+Furthermore, as total living space is generally very important when people buy houses, we also create the variable "TotalSF" which sums all the square feet variables TotalExtraSF, GrLivArea and TotalBsmtSF. And we will use this varible to create natural spline. Details will be discussed later.
+
+```{r, include = FALSE}
+
+Predictors$TotalExtraSF <- Predictors$MasVnrArea + Predictors$LowQualFinSF + Predictors$WoodDeckSF + Predictors$OpenPorchSF + Predictors$EnclosedPorch + Predictors$X3SsnPorch + Predictors$ScreenPorch + Predictors$PoolArea
+Predictors[,c('MasVnrArea','LowQualFinSF','WoodDeckSF','OpenPorchSF','EnclosedPorch','X3SsnPorch','ScreenPorch','PoolArea')] <- NULL
+dim(Predictors)
+
+Predictors$TotalSF <- Predictors$TotalExtraSF + Predictors$GrLivArea + Predictors$TotalBsmtSF
+```
+
+## Transfer Year variables to number of years
+
+We would like to transer year variables YearBuilt, YearRemodAdd and GarageYrBlt to number of years by using $2020 - Years$. Since we perform box-cox transformation later, number of years can have a more reasonable value than specific years after box-cox transformation.
+
+```{r, include = FALSE, echo=FALSE}
+YearCols = c("YearBuilt", "YearRemodAdd", "GarageYrBlt")
+for (col in YearCols) {
+  Predictors[col] = 2020 - Predictors[col]
+}
+```
+
+## Box-Cox Transformation on Important Continuous Numeric Predictors
+
+Below continuous numeric variables are important predictors with right skewness
+
+* LotFrontage, LotArea
+* BsmtFinSF1, BsmtFinSF2, BsmtUnfSF, TotalBsmtSF
+* X1stFlrSF, X2ndFlrSF,GrLivArea, TotalExtraSF
+
+We apply box-cox transformation on these variables by using preProcess() and specifying method = "BoxCox".
+
+```{r, include = FALSE}
+QuantColName = colnames(Predictors)[apply(Predictors,2,max) > 10]
+QuantPredictors = Predictors[,QuantColName]
+PredictorsPP <- preProcess(QuantPredictors,method = "BoxCox")
+PredictorsTrans <- predict(PredictorsPP,QuantPredictors)
+Predictors[,QuantColName] <- NULL
+Predictors <- cbind(Predictors,PredictorsTrans)
+```
+
+## Natural Cubic Spline
+
+As mentioned,we create new variables TotalSF which contain all the space area variables. Since TotalSF contains non-linear relationship with SalePrice, we create Natural Cubic Spline on TotalSF with $5\space DF$ and remove the original variable TotalSF.
+
+```{r, fig.height=3,fig.width=4, echo=FALSE,,fig.align = 'center'}
+# square feet variables in Predictors have already done box-cox transfomration.
+# So here we are using data from orginal dataset df 
+subset_df = subset(df, SalePrice > 0)
+subset_df$TotalExtraSF <- subset_df$MasVnrArea + subset_df$LowQualFinSF + subset_df$WoodDeckSF + subset_df$OpenPorchSF + subset_df$EnclosedPorch + subset_df$X3SsnPorch + subset_df$ScreenPorch + subset_df$PoolArea
+subset_df$TotalSF <- subset_df$TotalExtraSF + subset_df$TotalBsmtSF + subset_df$GrLivArea
+plot(subset_df$TotalSF,subset_df$SalePrice, xlab = 'TotalSF', ylab = 'SalePrice')
+```
+
+```{r, include = FALSE}
+natural_spine = ns(Predictors$TotalSF,df = 5)
+colnames(natural_spine) <- c('TotalSF01','TotalSF02','TotalSF03','TotalSF4','TotalSF05')
+Predictors$TotalSF <- NULL
+Predictors <- cbind(Predictors,natural_spine)
+```
+
+## Log Transformation on SalePrice
+
+Last but not least, because SalePrice has the right skewness $1.5643$, we perform log transformation on SalePrice.
+
+```{r,include=FALSE}
+logSalePrice = log(SalePrice)
+```
+
+# Modelling
+
+We begin this section with $2915$ observations and $197$ predictors. The full list of predictors can be found in the appendix. We split the first $1456$ in the training set and the rest into the testing set. Then we use the training set to fit a ridge regression model, a lasso model, and an elastic net model. For the righe model and the lasso model, we use cv.glmnet() and specify nfold = 10 to conduct 10-fold cross validation. For the Elastic Net model, we use train() and have 5 repeat times of 10-fold cross validation.
+
+Based on the Lasso regression that performs the variable selection, we retain $80$ variables. The full list of retained variables can be found in the appndex. 
+
+```{r, include=FALSE}
+training_df = Predictors[c(1:1456),]
+testing_df = Predictors[-c(1:1456),]
+```
+
+## The solution Path of Ridge Model
+
+```{r,echo=FALSE, fig.height=3.2, fig.width=6,fig.align = 'center'}
+house.glmnet.rf <- cv.glmnet(as.matrix(training_df), logSalePrice, alpha=0)
+best.lambda.rf<- house.glmnet.rf$lambda.min
+plot(house.glmnet.rf$glmnet.fit)
+```
+
+## The solution Path of Lasso Model
+
+```{r, echo = FALSE,fig.height=3.2, fig.width=6,fig.align = 'center'}
+house.glmnet.lasso <- cv.glmnet(as.matrix(training_df), logSalePrice, alpha=1)
+##Optimal tuning parameter
+best.lambda.lasso <- house.glmnet.lasso$lambda.min
+plot(house.glmnet.lasso$glmnet.fit)
+```
+
+## The Solutin Path of Elastic Net Model 
+
+```{r, echo=FALSE,fig.height=3.2, fig.width=6,fig.align = 'center'}
+tcontrol <- trainControl(method="repeatedcv", number=10, repeats=5)
+house.glmnet.en <- train(as.matrix(training_df), logSalePrice, trControl=tcontrol,
+                     method="glmnet", tuneLength=10)
+best.lambda.en <- house.glmnet.en$bestTune$lambda
+best.alpha.en <- house.glmnet.en$bestTune$alpha
+house.glmnet.en2 <- house.glmnet.en$finalModel
+plot(house.glmnet.en2)
+```
+
+```{r, include=FALSE}
+ridge.pred <- predict(house.glmnet.rf, as.matrix(testing_df), s=best.lambda.rf)
+lasso.pred <- predict(house.glmnet.lasso, as.matrix(testing_df), s=best.lambda.lasso)
+en.pred <- predict(house.glmnet.en, as.matrix(testing_df), s=best.lambda.en)
+
+test_df_format <- function(df,testID){
+  df <- data.frame(Id = testID,SalePrice = df)
+  names(df) <- c("Id","SalePrice")
+  return(df)
+}
+lasso.pred <- test_df_format(exp(lasso.pred),testID)
+ridge.pred <- test_df_format(exp(ridge.pred),testID)
+en.pred <- test_df_format(exp(en.pred),testID)
+avg.pred <- lasso.pred * 0.4 + ridge.pred * 0.3 + en.pred * 0.3
+
+write.csv(ridge.pred,"logridge_pred_02092020.csv", row.names = FALSE)
+write.csv(lasso.pred,"loglasso_pred_02092020.csv", row.names = FALSE)
+write.csv(en.pred,"logen_pred_02092020.csv", row.names = FALSE)
+write.csv(avg.pred,"avg_pred_02092020.csv", row.names = FALSE)
+```
+
+# How this analysis improves upon your project
+
+Compare with previous project, above analysis improves my project as below
+
+* Data Cleaning
+    + Pre-screening the important predictors and sales price, identify and remove the outliers cannot represent general trend
+    + Combine the train and test set together and impute missing values, which is more consistent and efficient 
+* Feature Engineering
+    + Comine the same type week predictors into one single strong predictor
+    + Apply box-cox transformation on quantitative predictors to fix non-normality issues, which perform better than log transformation in this project
+    + Use natural spline to capture non-linearity
+* Predicting
+    + Combine the results from different models by using weighting average to make a final predition
+
+# Conclusion with Limitation
+
+In this data assignment, we build an imporved predictive model for sales price of homes in Ames Iowa. We start from $80$ predictors, and finally feed $197$ variables to the model(The variable list is in appendix). Based on the $80$ variables selected from Lasso Model, we can conclude that, besides the space areas, these charasterics are associated with SalePrice
+
+* the general zoning classification of the sale.
+* Neighborhood located
+* Type of road access to property, Type of dwelling involved in the sale, Type of heating, Type of roof, Type of foundation and Slope of property
+* Home functionality
+* Condition of sale and Type of sale
+* Exterior covering on house
+* Central air conditioning
+* Kitchens above grade
+* Garage location, Size of garage in car capacity, Lot size and Lot configuration
+* Number of construction years 
+* Number of Bathrooms
+
+We also identify below limitations in our analysis
+
+* We simply apply KNN method to impute missing values, which may have limits of KNN model.
+* There is a risk of overfitting since we apply seveal feature engineering methods to create new variables.
+* Though we apply natrual spline, we still mainly focus on linear relationship between the predictors and SalePrice. Thus, we face the limitation of linear relationship for most predictors.
+* Based on the variable selection from Lasso Model, we can only tell which variables are related to SalePrice. However, we have limitations on knowing the feature importance of these variables.
+
+\newpage
+# Appendix
+
+## Kaggle Score
+
+For this assignment, we are taking weighted average price from three models as below to get final preidictions
+
+```{r, eval=FALSE}
+avg.pred <- lasso.pred * 0.4 + ridge.pred * 0.3 + en.pred * 0.3
+```
+<p>
+![Kaggle](kaggle.png)
+</p>
+
+## Full list of 197 predictors at the beginning
+
+```{r,echo=FALSE}
+colnames(Predictors)
+```
+
+## Selected predictors based on the Lasso Model
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+set.seed(1)
+out <- glmnet(as.matrix(training_df), logSalePrice, alpha=1, lambda= house.glmnet.lasso$lambda.min)
+lasso.coef <- predict(out,type="coefficients",s=house.glmnet.lasso$lambda.min)
+lasso.coef <- as.matrix(lasso.coef)
+sort(abs(lasso.coef[lasso.coef[,1] != 0,]),decreasing = TRUE)
+```
+
+## Full Code
+
+```{r, eval=FALSE}
+
+rm(list=ls())
+require("knitr")
+opts_knit$set(root.dir = "~/Desktop/STAT6302/Data Assignment 01")
+
+rm(list=ls())
+library(Sleuth2)
+library(glmnet)
+library(caret)
+library(leaps)
+library(bestglm)
+library(VIM)
+library(plyr)
+library(dplyr)
+library(MASS)
+library(ggplot2)
+library(gmodels)
+library(Hmisc) 
+library(corrplot)
+library(earth)
+library(splines)
+
+train <- read.csv("train.csv", stringsAsFactors = FALSE)
+test <- read.csv("test.csv", stringsAsFactors = FALSE)
+testID <- test$Id
+
+# Introduction
+
+train[(train['GrLivArea'] > 4000) & (train['SalePrice'] > 300000),c('SalePrice','GrLivArea','OverallQual', 'OverallCond')]
+
+train = subset(train, GrLivArea < 4000)
+SalePrice = train$SalePrice
+test$SalePrice <- 0
+
+#Combine the test and train data set and remove Id columns
+df <- rbind(train,test)
+df$Id <- NULL
+
+NAcols2 = c("PoolQC","MasVnrType", "MiscFeature","Alley","Fence", "FireplaceQu","GarageFinish","GarageQual","GarageCond","GarageType",
+         "BsmtCond","BsmtExposure","BsmtQual","BsmtFinType2","BsmtFinType1")
+for (col in NAcols2){
+  df[col][is.na(df[col])] = "None"
+}
+
+
+df = kNN(df)
+df = df[,1:80]
+
+
+# Feature Engineering
+
+
+## Transformation
+
+
+# transform YrSold and MoSold from numerical variables to factor variables. 
+df$YrSold <- as.factor(df$YrSold)
+df$MoSold <- as.factor(df$MoSold)
+
+# transform MSSubClass from numerical values to string values
+df$MSSubClass <- as.factor(df$MSSubClass)
+df$MSSubClass<-revalue(df$MSSubClass, c('20'='1 story 1946+', '30'='1 story 1945-', 
+                                        '40'='1 story unf attic', '45'='1,5 story unf', 
+                                        '50'='1,5 story fin', '60'='2 story 1946+', 
+                                        '70'='2 story 1945-', '75'='2,5 story all ages', 
+                                        '80'='split/multi level', '85'='split foyer', 
+                                        '90'='duplex all style/age','120'='1 story PUD 1946+', 
+                                        '150'='1,5 story PUD all','160'='2 story PUD 1946+', 
+                                        '180'='PUD multilevel', '190'='2 family conversion'))
+
+# transform "PoolQC","ExterQual","ExterCond", "BsmtQual", "BsmtCond", "BsmtExposure", 
+# "HeatingQC", "KitchenQual", "FireplaceQu", "GarageQual", "GarageCond","BsmtFinType1", 
+# "BsmtFinType2" from character evaluation values to numeric values.
+
+Score <- function(condition){
+  if (condition == "None") {result = 0}
+  else if (condition == "GLQ") {result = 6}
+  else if (is.element(condition,c("Ex","ALQ"))) {result = 5}
+  else if (is.element(condition,c("Gd","BLQ"))) {result = 4}
+  else if (is.element(condition,c("Av","Rec","TA"))) {result = 3}
+  else if (is.element(condition,c("Fa","LwQ","Mn") )){result = 2}
+  else if (is.element(condition,c("Po","Unf","No"))) {result = 1}
+  else {
+    result = condition
+  }
+  return(result)
+}
+
+score_cols_1 <- c("PoolQC","ExterQual","ExterCond", "BsmtQual", "BsmtCond", 
+                  "BsmtExposure", "HeatingQC", "KitchenQual", "FireplaceQu", 
+                  "GarageQual", "GarageCond","BsmtFinType1", "BsmtFinType2")
+
+for (col in score_cols_1){
+  df[col] = apply(df[col],1,Score)
+}
+
+  
+## Creating Dummy variables
+
+
+Predictors = model.matrix(SalePrice ~., data = df)
+Predictors = Predictors[,-1] # cut off the intercept from the first column
+
+
+## Identify and remove predictors with near-zero variance
+
+
+Predictors_train <- Predictors[df$SalePrice != 0,]
+Predictors_test <- Predictors[df$SalePrice == 0,]
+  
+MissingValuesInTrain <- apply(Predictors_train,2 ,sum)
+MissingValuesInTrain <- names(MissingValuesInTrain[MissingValuesInTrain==0])
+MissingValuesInTest <- apply(Predictors_test,2,sum)
+MissingValuesInTest <- names(MissingValuesInTest[MissingValuesInTest==0])
+Drop_Cols = c(MissingValuesInTrain, MissingValuesInTest)
+Predictors <- Predictors[,!(colnames(Predictors) %in% Drop_Cols)]
+
+# Drop above columns
+LessThan10Varibles <- apply(Predictors,2 ,sum)
+LessThan10Varibles <- names(LessThan10Varibles[LessThan10Varibles<=10])
+Predictors <- Predictors[,!(colnames(Predictors) %in% LessThan10Varibles)]
+
+## Create new variable TotalBath
+
+
+Predictors = data.frame(Predictors)
+Predictors$TotalBath <- Predictors$HalfBath*0.5 + Predictors$FullBath +
+  Predictors$BsmtFullBath + Predictors$BsmtHalfBath*0.5
+res <- cbind(Predictors[df$SalePrice!=0,c('TotalBath','BsmtFullBath',
+                                          'BsmtHalfBath','FullBath','HalfBath')],
+             df[df$SalePrice!=0,]$SalePrice)
+names(res) <- c('TotalBath','BsmtFullBath','BsmtHalfBath','FullBath',
+                'HalfBath','SalePrice')
+round(cor(res)[,6],4)
+Predictors[,c('BsmtFullBath','BsmtHalfBath','FullBath','HalfBath')] <- NULL
+
+
+## Create new variables HighValuePlace
+
+
+par(mfrow = c(1,2))
+ggplot(data = df[df$SalePrice > 0,],aes(x=reorder(Neighborhood, SalePrice, FUN=mean)
+                                        ,y=SalePrice)) +
+  geom_bar(stat = 'summary', fun.y = 'mean', fill = 'blue') +
+  labs(x='Neighborhood',y='Median SalePrice') +
+  theme(axis.text.x = element_text(angle = 75, hjust = 1))
+Predictors['HighValuePlace'] <- 0
+Predictors[df$Neighborhood %in% c("StoneBr","NridgHt","NoRidge"),]['HighValuePlace'] <- 1
+
+## Create new variable TotalExtraSF and TotalSF
+
+
+
+Predictors$TotalExtraSF <- Predictors$MasVnrArea + Predictors$LowQualFinSF + 
+  Predictors$WoodDeckSF + Predictors$OpenPorchSF + Predictors$EnclosedPorch +
+  Predictors$X3SsnPorch + Predictors$ScreenPorch + Predictors$PoolArea
+Predictors[,c('MasVnrArea','LowQualFinSF','WoodDeckSF','OpenPorchSF',
+              'EnclosedPorch','X3SsnPorch','ScreenPorch','PoolArea')] <- NULL
+dim(Predictors)
+
+Predictors$TotalSF <- Predictors$TotalExtraSF + Predictors$GrLivArea + Predictors$TotalBsmtSF
+
+YearCols = c("YearBuilt", "YearRemodAdd", "GarageYrBlt")
+for (col in YearCols) {
+  Predictors[col] = 2020 - Predictors[col]
+}
+
+## Box-Cox Transformation on Important Continuous Numeric Predictors
+
+
+QuantColName = colnames(Predictors)[apply(Predictors,2,max) > 10]
+QuantPredictors = Predictors[,QuantColName]
+PredictorsPP <- preProcess(QuantPredictors,method = "BoxCox")
+PredictorsTrans <- predict(PredictorsPP,QuantPredictors)
+Predictors[,QuantColName] <- NULL
+Predictors <- cbind(Predictors,PredictorsTrans)
+
+
+## Natural Cubic Spline
+
+
+# square feet variables in Predictors have already done box-cox transfomration.
+# So here we are using data from orginal dataset df 
+subset_df = subset(df, SalePrice > 0)
+subset_df$TotalExtraSF <- subset_df$MasVnrArea + subset_df$LowQualFinSF +
+  subset_df$WoodDeckSF + subset_df$OpenPorchSF + subset_df$EnclosedPorch +
+  subset_df$X3SsnPorch + subset_df$ScreenPorch + subset_df$PoolArea
+subset_df$TotalSF <- subset_df$TotalExtraSF + subset_df$TotalBsmtSF + subset_df$GrLivArea
+plot(subset_df$TotalSF,subset_df$SalePrice, xlab = 'TotalSF', ylab = 'SalePrice')
+
+natural_spine = ns(Predictors$TotalSF,df = 5)
+colnames(natural_spine) <- c('TotalSF01','TotalSF02','TotalSF03','TotalSF4','TotalSF05')
+Predictors$TotalSF <- NULL
+Predictors <- cbind(Predictors,natural_spine)
+
+## Log Transformation on SalePrice
+
+logSalePrice = log(SalePrice)
+
+# Modelling
+
+training_df = Predictors[c(1:1456),]
+testing_df = Predictors[-c(1:1456),]
+
+## The solution Path of Ridge Regression
+
+house.glmnet.rf <- cv.glmnet(as.matrix(training_df), logSalePrice, alpha=0)
+best.lambda.rf<- house.glmnet.rf$lambda.min
+plot(house.glmnet.rf$glmnet.fit)
+
+## The solution Path of Lasso
+
+house.glmnet.lasso <- cv.glmnet(as.matrix(training_df), logSalePrice, alpha=1)
+##Optimal tuning parameter
+best.lambda.lasso <- house.glmnet.lasso$lambda.min
+plot(house.glmnet.lasso$glmnet.fit)
+
+## The Solutin Path of Elastic Net 
+
+tcontrol <- trainControl(method="repeatedcv", number=10, repeats=5)
+house.glmnet.en <- train(as.matrix(training_df), logSalePrice, trControl=tcontrol,
+                     method="glmnet", tuneLength=10)
+best.lambda.en <- house.glmnet.en$bestTune$lambda
+best.alpha.en <- house.glmnet.en$bestTune$alpha
+house.glmnet.en2 <- house.glmnet.en$finalModel
+plot(house.glmnet.en2)
+
+ridge.pred <- predict(house.glmnet.rf, as.matrix(testing_df), s=best.lambda.rf)
+lasso.pred <- predict(house.glmnet.lasso, as.matrix(testing_df), s=best.lambda.lasso)
+en.pred <- predict(house.glmnet.en, as.matrix(testing_df), s=best.lambda.en)
+
+test_df_format <- function(df,testID){
+  df <- data.frame(Id = testID,SalePrice = df)
+  names(df) <- c("Id","SalePrice")
+  return(df)
+}
+lasso.pred <- test_df_format(exp(lasso.pred),testID)
+ridge.pred <- test_df_format(exp(ridge.pred),testID)
+en.pred <- test_df_format(exp(en.pred),testID)
+avg.pred <- lasso.pred * 0.4 + ridge.pred * 0.3 + en.pred * 0.3
+
+write.csv(ridge.pred,"logridge_pred_02092020.csv", row.names = FALSE)
+write.csv(lasso.pred,"loglasso_pred_02092020.csv", row.names = FALSE)
+write.csv(en.pred,"logen_pred_02092020.csv", row.names = FALSE)
+write.csv(avg.pred,"avg_pred_02092020.csv", row.names = FALSE)
+
+colnames(Predictors)
+
+set.seed(1)
+out <- glmnet(as.matrix(training_df), logSalePrice, alpha=1, 
+              lambda= house.glmnet.lasso$lambda.min)
+lasso.coef <- predict(out,type="coefficients",s=house.glmnet.lasso$lambda.min)
+lasso.coef <- as.matrix(lasso.coef)
+sort(lasso.coef[lasso.coef[,1] != 0,])
+```
